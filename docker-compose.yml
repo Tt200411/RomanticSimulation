@@ -1,0 +1,79 @@
+services:
+  postgres:
+    image: docker.m.daocloud.io/library/postgres:16-alpine
+    environment:
+      POSTGRES_DB: love_simulator
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d love_simulator"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: docker.m.daocloud.io/library/redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  backend:
+    build:
+      context: ./backend
+    working_dir: /app
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/love_simulator
+      REDIS_URL: redis://redis:6379/0
+      CORS_ORIGINS: '["http://localhost:3000"]'
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DIRECTOR_PROVIDER_MODE: ${DIRECTOR_PROVIDER_MODE:-auto}
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: sh -c "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health')\""]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  worker:
+    build:
+      context: ./backend
+    working_dir: /app
+    environment:
+      DATABASE_URL: postgresql+psycopg://postgres:postgres@postgres:5432/love_simulator
+      REDIS_URL: redis://redis:6379/0
+      DASHSCOPE_API_KEY: ${DASHSCOPE_API_KEY:-}
+      DIRECTOR_PROVIDER_MODE: ${DIRECTOR_PROVIDER_MODE:-auto}
+    depends_on:
+      backend:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python -m app.workers.worker
+
+  frontend:
+    build:
+      context: ./frontend
+    environment:
+      NEXT_PUBLIC_API_BASE_URL: http://localhost:8000/api
+    depends_on:
+      backend:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
