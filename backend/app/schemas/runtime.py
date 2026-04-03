@@ -88,12 +88,29 @@ class ScenePairDateResult(BaseModel):
     level_semantic: str = "level_01_beginning_appeal"
 
 
+class SceneCompetitionMapItem(BaseModel):
+    source_participant_id: str
+    target_participant_id: str
+    focus_participant_id: str | None = None
+    competition_sense: int = 0
+    reason: str
+    event_tags: list[str] = Field(default_factory=list)
+
+    @field_validator("competition_sense")
+    @classmethod
+    def validate_competition_sense(cls, value: int) -> int:
+        if value < 0 or value > 100:
+            raise ValueError("competition_sense must stay within [0, 100]")
+        return value
+
+
 class SceneRefereeResult(BaseModel):
     scene_id: str
     scene_summary: str
     major_events: list[SceneEvent] = Field(default_factory=list)
     relationship_deltas: list[SceneRelationshipDelta] = Field(default_factory=list)
     pair_date_results: list[ScenePairDateResult] = Field(default_factory=list)
+    competition_map: list[SceneCompetitionMapItem] = Field(default_factory=list)
     participant_memory_updates: list[dict] = Field(default_factory=list)
     next_tension: str
 
@@ -228,6 +245,7 @@ class SceneReplayResponse(BaseModel):
     major_events: list[SceneEvent] = Field(default_factory=list)
     relationship_deltas: list[SceneRelationshipDelta] = Field(default_factory=list)
     pair_date_results: list[ScenePairDateResult] = Field(default_factory=list)
+    competition_map: list[SceneCompetitionMapItem] = Field(default_factory=list)
     group_state_after_scene: dict = Field(default_factory=dict)
     next_tension: str | None = None
     replay_url: str | None = None

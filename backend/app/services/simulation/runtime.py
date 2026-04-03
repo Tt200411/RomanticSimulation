@@ -32,6 +32,7 @@ from app.schemas.runtime import (
     AgentTurnPayload,
     ParticipantCard,
     PlanParticipant,
+    SceneCompetitionMapItem,
     SceneEvent,
     SceneOrchestratorPlan,
     ScenePairDateResult,
@@ -44,6 +45,7 @@ from app.services.simulation.scene_registry import (
     SCENE_01_CODE,
     SCENE_02_CODE,
     SCENE_03_CODE,
+    SCENE_04_CODE,
 )
 from app.services.simulation.service import (
     build_relationship_surface_metrics,
@@ -127,6 +129,20 @@ SCENE_CONFIG = {
             "Round 3 scene wrap-up",
         ],
     },
+    SCENE_04_CODE: {
+        "scene_goal": "把随机约会后的信号放回全员晚餐场，暴露竞争关系与社交稳定度",
+        "scene_frame": "多人晚餐场中，偏好释放、旁观判断和竞争压力同步发生并影响下一场主动选择。",
+        "scene_level": "level_02_relationship_promotion",
+        "min_turns": 8,
+        "max_turns": 10,
+        "planned_rounds": 4,
+        "phase_outline": [
+            "Round 1 dinner warm-up",
+            "Round 2 attention shift",
+            "Round 3 competition exposure",
+            "Round 4 closing residue",
+        ],
+    },
 }
 
 
@@ -197,6 +213,7 @@ def execute_scene_runtime(
             relationship_delta.model_dump()
             for relationship_delta in referee_result.relationship_deltas
         ],
+        "competition_map": [item.model_dump() for item in referee_result.competition_map],
         "next_tension": referee_result.next_tension,
         "replay_url": f"/simulations/{simulation.id}/scenes/{scene_run.id}",
     }
@@ -247,6 +264,7 @@ def execute_scene_03_runtime(
         major_events=major_events,
         relationship_deltas=relationship_deltas,
         pair_date_results=pair_results,
+        competition_map=[],
         participant_memory_updates=memory_updates,
         next_tension=next_tension,
     )
@@ -265,6 +283,7 @@ def execute_scene_03_runtime(
             for relationship_delta in referee_result.relationship_deltas
         ],
         "pair_date_results": [item.model_dump() for item in referee_result.pair_date_results],
+        "competition_map": [item.model_dump() for item in referee_result.competition_map],
         "group_state_after_scene": {
             "dominant_topics": [],
             "attention_distribution": [],
@@ -320,6 +339,150 @@ def build_scene_03_interest_target(context: dict, participant_id: str) -> str | 
             best_score = score
             best_target = other.id
     return best_target
+
+
+def build_scene_04_competition_seed_pairs(context: dict) -> list[dict]:
+    pairs = []
+    participants = context["participants"]
+    for source in participants:
+        for target in participants:
+            if source.id == target.id:
+                continue
+            forward = context["relationship_map"].get((source.id, target.id))
+            if forward is None:
+                continue
+            metrics = forward.metrics or {}
+            score = (
+                metrics.get("attraction", 0)
+                + metrics.get("curiosity", 0)
+                + metrics.get("expectation", 0)
+                - metrics.get("anxiety", 0) * 0.4
+            )
+            pairs.append(
+                {
+                    "source_participant_id": source.id,
+                    "target_participant_id": target.id,
+                    "score": int(round(score)),
+                }
+            )
+    pairs.sort(key=lambda item: item["score"], reverse=True)
+    return pairs[:6]
+
+
+def build_scene_04_focus_target(context: dict, speaker_id: str) -> str | None:
+    best_target = None
+    best_score = -10**9
+    for participant in context["participants"]:
+        if participant.id == speaker_id:
+            continue
+        relation = context["relationship_map"].get((speaker_id, participant.id))
+        metrics = relation.metrics if relation else {}
+        score = (
+            metrics.get("attraction", 0) * 1.1
+            + metrics.get("curiosity", 0)
+            + metrics.get("trust", 0)
+            - metrics.get("anxiety", 0) * 0.4
+        )
+        if score > best_score:
+            best_score = score
+            best_target = participant.id
+    return best_target
+
+
+def apply_scene_04_strategy_bias(
+    context: dict,
+    participant: ParticipantProfile,
+    counts: dict[str, int],
+    last_turn: AgentTurnPayload | None,
+) -> float:
+    strategy_cards = context.get("strategy_cards", [])
+    personality = participant.editable_personality or {}
+    bonus = 0.0
+    if "hold_center" in strategy_cards:
+        bonus += (int(personality.get("self_esteem_stability", 50)) - 50) / 10
+        bonus += (int(personality.get("initiative", 50)) - 50) / 16
+    if "focus_one_person" in strategy_cards:
+        focus_target = build_scene_04_focus_target(context, participant.id)
+        if last_turn and focus_target and focus_target in last_turn.target_participant_ids:
+            bonus += 4.0
+        bonus += max(0.0, 2.0 - counts.get(participant.id, 0) * 0.3)
+    if "avoid_competition" in strategy_cards:
+        bonus -= (int(personality.get("initiative", 50)) - 50) / 20
+        bonus += (int(personality.get("self_esteem_stability", 50)) - 50) / 16
+    return bonus
+
+
+def apply_scene_04_turn_strategy_bias(
+    context: dict,
+    turn: AgentTurnPayload,
+    changes: dict[str, int],
+) -> dict[str, int]:
+    adjusted = dict(changes)
+    strategy_cards = context.get("strategy_cards", [])
+    if "hold_center" in strategy_cards:
+        adjusted["trust"] = adjusted.get("trust", 0) + 2
+        adjusted["anxiety"] = adjusted.get("anxiety", 0) - 1
+    if "focus_one_person" in strategy_cards and len(turn.target_participant_ids) == 1:
+        adjusted["competition_sense"] = adjusted.get("competition_sense", 0) + 2
+        adjusted["anxiety"] = adjusted.get("anxiety", 0) + 1
+    if "avoid_competition" in strategy_cards:
+        adjusted["competition_sense"] = adjusted.get("competition_sense", 0) - 1
+        adjusted["conflict"] = adjusted.get("conflict", 0) - 1
+    return adjusted
+
+
+def derive_scene_04_competition_map(
+    context: dict,
+    transcript: list[AgentTurnPayload],
+    relationship_deltas: list[SceneRelationshipDelta],
+) -> list[SceneCompetitionMapItem]:
+    target_sources: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    for turn in transcript:
+        for target_id in turn.target_participant_ids:
+            target_sources[target_id][turn.speaker_participant_id] += 1
+
+    delta_lookup = {
+        (item.source_participant_id, item.target_participant_id): item
+        for item in relationship_deltas
+    }
+    results = []
+    for focus_id, source_counts in target_sources.items():
+        sources = sorted(source_counts.items(), key=lambda item: item[1], reverse=True)
+        if len(sources) < 2:
+            continue
+        primary_source, primary_count = sources[0]
+        secondary_source, secondary_count = sources[1]
+        primary_delta = delta_lookup.get((primary_source, focus_id))
+        secondary_delta = delta_lookup.get((secondary_source, focus_id))
+        anxiety_pressure = 0
+        if primary_delta:
+            anxiety_pressure += max(0, primary_delta.changes.get("anxiety", 0))
+        if secondary_delta:
+            anxiety_pressure += max(0, secondary_delta.changes.get("anxiety", 0))
+        score = clamp(35 + (primary_count + secondary_count) * 10 + anxiety_pressure * 2, 0, 100)
+
+        primary_name = context["participant_lookup"].get(primary_source)
+        secondary_name = context["participant_lookup"].get(secondary_source)
+        focus_name = context["participant_lookup"].get(focus_id)
+        source_text = primary_name.name if primary_name else primary_source
+        target_text = secondary_name.name if secondary_name else secondary_source
+        focus_text = focus_name.name if focus_name else focus_id
+
+        results.append(
+            SceneCompetitionMapItem(
+                source_participant_id=primary_source,
+                target_participant_id=secondary_source,
+                focus_participant_id=focus_id,
+                competition_sense=score,
+                reason=(
+                    f"{source_text} 与 {target_text} 在晚餐中都持续向 {focus_text} 投射注意力，"
+                    "公开场合下形成了明显竞争。"
+                ),
+                event_tags=["competition_signal", "group_dinner", "scene_04_level_02"],
+            )
+        )
+    results.sort(key=lambda item: item.competition_sense, reverse=True)
+    return results[:6]
 
 
 def apply_scene_03_strategy_bias(
@@ -976,7 +1139,7 @@ def select_scene_participants(
     participants: list[ParticipantProfile],
     relationship_map: dict[tuple[str, str], RelationshipState],
 ) -> list[ParticipantProfile]:
-    if scene_code == SCENE_03_CODE:
+    if scene_code in {SCENE_03_CODE, SCENE_04_CODE}:
         return participants
     if scene_code == SCENE_01_CODE or len(participants) <= 4:
         return participants[:5]
@@ -1020,6 +1183,8 @@ def build_input_summary(context: dict) -> dict:
             participant.id: build_scene_03_interest_target(context, participant.id)
             for participant in context["participants"]
         }
+    if context["scene_id"] == SCENE_04_CODE:
+        payload["competition_seed_pairs"] = build_scene_04_competition_seed_pairs(context)
     return payload
 
 
@@ -1065,6 +1230,8 @@ def build_active_tension(context: dict) -> str:
         return "第一轮好感正在形成，但谁会主动继续接话、谁更像在观察别人，马上会影响下一场自由交流的站位。"
     if context["scene_id"] == SCENE_03_CODE:
         return "随机配对会打破最初期待：有人会意外升温，也有人会因没匹到在意对象而焦虑上升。"
+    if context["scene_id"] == SCENE_04_CODE:
+        return "随机约会后的关系被放回全员晚餐场，公开注意力与旁观解读会迅速放大竞争感和安全感差异。"
     return "表面舒服和真正被理解正在分化，有人会继续靠近，也有人会因为多人气氛开始误读彼此。"
 
 
@@ -1073,6 +1240,8 @@ def build_stop_condition(scene_id: str) -> str:
         return "至少完成 2 轮有效互动，并出现 2 次交叉追问和 1 次非中心角色被注意到。"
     if scene_id == SCENE_03_CODE:
         return "所有随机 1v1 约会（含可能的轮空观察位）都完成并产出配对级结果。"
+    if scene_id == SCENE_04_CODE:
+        return "至少完成 2 轮以上多人晚餐互动，并形成注意力偏移、竞争信号和观察者视角。"
     return "至少完成 2 轮以上多人对话，并形成下一场可能的靠近、误会或竞争张力。"
 
 
@@ -1090,6 +1259,12 @@ def build_participant_directive(participant: ParticipantProfile, scene_id: str) 
         if personality.get("emotional_openness", 50) <= 40:
             return "先用安全话题试探，再决定是否暴露真实偏好。"
         return "在随机 1v1 中验证真实吸引，记录这次连接是否值得下一层继续观察。"
+    if scene_id == SCENE_04_CODE:
+        if personality.get("self_esteem_stability", 50) >= 65:
+            return "在多人晚餐里保持稳定表达，既回应目标对象也留给旁观者可读信号。"
+        if personality.get("initiative", 50) >= 65:
+            return "主动发言并观察竞争线变化，避免把公开偏好释放推成失控对位。"
+        return "先观察注意力分布，再在关键节点介入，避免完全边缘化。"
     if personality.get("emotional_openness", 50) >= 60:
         return "把话题推进到更具体的关系看法，同时留意谁真的在认真回应。"
     return "先接住他人的深一点话题，再决定是否暴露更多真实偏好。"
@@ -1130,6 +1305,8 @@ def choose_next_speaker(
                     score -= 20
         if not transcript:
             score += int(personality.get("initiative", 50)) / 6
+        if context["scene_id"] == SCENE_04_CODE:
+            score += apply_scene_04_strategy_bias(context, participant, counts, last_turn)
         best_score = max(best_score, score)
         if score == best_score:
             best_id = participant.id
@@ -1182,6 +1359,9 @@ def build_agent_input(
         "scene_goal": plan.scene_goal,
         "active_tension": plan.active_tension,
         "strategy_cards": context["strategy_cards"],
+        "scene_04_focus_target": build_scene_04_focus_target(context, speaker_id)
+        if context["scene_id"] == SCENE_04_CODE
+        else None,
         "recent_transcript": [item.model_dump() for item in transcript[-5:]],
         "outgoing_relationships": outgoing_relationships,
         "incoming_relationships": incoming_relationships,
@@ -1253,6 +1433,13 @@ def build_mock_turn(
         )
         intent_tags = ["break_ice", "probe_depth"]
         topic_tags = ["first_impression", "commute", "group_energy"]
+    elif context["scene_id"] == SCENE_04_CODE:
+        utterance = (
+            f"在这种多人晚餐里我更在意谁会把回应说具体。"
+            f"{target_name}，你刚才那句更像真心还是礼貌？"
+        )
+        intent_tags = ["signal_interest", "invite_group"]
+        topic_tags = ["group_dinner", "attention_shift", "competition_signal"]
     else:
         utterance = (
             f"如果真的要在这里继续了解一个人，我会更在意对方有没有把话听进去。"
@@ -1265,7 +1452,11 @@ def build_mock_turn(
         target_id = targets[(turn_index + 1) % len(targets)]
         target_name = context["participant_lookup"][target_id].name
         utterance = utterance.replace("你会", f"{target_name}，你会")
-        intent_tags = ["build_comfort", "invite_group"]
+        if context["scene_id"] == SCENE_04_CODE:
+            intent_tags = ["protect_self_image", "invite_group"]
+            topic_tags = ["group_dinner", "observer_reaction", "competition_signal"]
+        else:
+            intent_tags = ["build_comfort", "invite_group"]
 
     return AgentTurnPayload(
         speaker_participant_id=speaker_id,
@@ -1369,6 +1560,7 @@ def build_referee_result(
     event_tag_map: dict[tuple[str, str], set[str]] = defaultdict(set)
     major_events: list[SceneEvent] = []
     participant_memory_updates = []
+    competition_map: list[SceneCompetitionMapItem] = []
 
     first_speaker = transcript[0].speaker_participant_id if transcript else None
     for turn in transcript:
@@ -1377,6 +1569,8 @@ def build_referee_result(
             continue
         primary_target = targets[0]
         changes = impact_from_intent_tags(turn.intent_tags, context["scene_id"])
+        if context["scene_id"] == SCENE_04_CODE:
+            changes = apply_scene_04_turn_strategy_bias(context, turn, changes)
         merge_changes(delta_map[(turn.speaker_participant_id, primary_target)], changes)
         event_tag_map[(turn.speaker_participant_id, primary_target)].update(turn.intent_tags)
         reason_map[(turn.speaker_participant_id, primary_target)].append(turn.utterance)
@@ -1394,7 +1588,11 @@ def build_referee_result(
                     continue
                 merge_changes(
                     delta_map[(observer.id, primary_target)],
-                    {"curiosity": 1, "anxiety": 1 if "signal_interest" in turn.intent_tags else 0},
+                    {
+                        "curiosity": 1,
+                        "anxiety": 1 if "signal_interest" in turn.intent_tags else 0,
+                        "competition_sense": 2 if context["scene_id"] == SCENE_04_CODE and "signal_interest" in turn.intent_tags else 0,
+                    },
                 )
                 event_tag_map[(observer.id, primary_target)].add("indirect_observation")
                 reason_map[(observer.id, primary_target)].append(
@@ -1431,6 +1629,22 @@ def build_referee_result(
             )
         )
 
+    if context["scene_id"] == SCENE_04_CODE:
+        competition_map = derive_scene_04_competition_map(context, transcript, relationship_deltas)
+        for item in competition_map:
+            relationship_deltas.append(
+                SceneRelationshipDelta(
+                    source_participant_id=item.source_participant_id,
+                    target_participant_id=item.target_participant_id,
+                    changes={
+                        "competition_sense": clamp(max(1, int(round(item.competition_sense / 12))), -18, 18),
+                        "anxiety": clamp(max(0, int(round(item.competition_sense / 24))), -18, 18),
+                    },
+                    reason=item.reason,
+                    event_tags=item.event_tags,
+                )
+            )
+
     for participant in context["participants"]:
         participant_related = [
             delta
@@ -1464,14 +1678,15 @@ def build_referee_result(
                 }
             )
 
-    scene_summary = summarize_scene(context, transcript, relationship_deltas)
-    next_tension = build_next_tension(context, transcript, relationship_deltas)
+    scene_summary = summarize_scene(context, transcript, relationship_deltas, competition_map)
+    next_tension = build_next_tension(context, transcript, relationship_deltas, competition_map)
     major_events = major_events[:6]
     return SceneRefereeResult(
         scene_id=context["scene_id"],
         scene_summary=scene_summary,
         major_events=major_events,
         relationship_deltas=relationship_deltas,
+        competition_map=competition_map,
         participant_memory_updates=participant_memory_updates,
         next_tension=next_tension,
     )
@@ -1499,6 +1714,13 @@ def impact_from_intent_tags(intent_tags: list[str], scene_id: str) -> dict[str, 
             merge_changes(changes, scale_changes({"comfort": -2, "anxiety": 3}, multiplier))
         elif tag == "invite_group":
             merge_changes(changes, scale_changes({"comfort": 3, "understood": 2}, multiplier))
+    if scene_id == SCENE_04_CODE:
+        if "signal_interest" in intent_tags:
+            merge_changes(changes, {"competition_sense": 3, "anxiety": 1})
+        if "build_comfort" in intent_tags or "show_stability" in intent_tags:
+            merge_changes(changes, {"trust": 2, "anxiety": -1})
+        if "protect_self_image" in intent_tags:
+            merge_changes(changes, {"conflict": 2, "anxiety": 2})
     return dict(changes)
 
 
@@ -1525,9 +1747,24 @@ def summarize_scene(
     context: dict,
     transcript: list[AgentTurnPayload],
     relationship_deltas: list[SceneRelationshipDelta],
+    competition_map: list[SceneCompetitionMapItem] | None = None,
 ) -> str:
     if not transcript:
         return "本场还没有形成足够的多人互动。"
+    if context["scene_id"] == SCENE_04_CODE:
+        if competition_map:
+            top_item = max(competition_map, key=lambda item: item.competition_sense)
+            source_name = context["participant_lookup"].get(top_item.source_participant_id)
+            target_name = context["participant_lookup"].get(top_item.target_participant_id)
+            focus_name = context["participant_lookup"].get(top_item.focus_participant_id) if top_item.focus_participant_id else None
+            source_text = source_name.name if source_name else top_item.source_participant_id
+            target_text = target_name.name if target_name else top_item.target_participant_id
+            focus_text = focus_name.name if focus_name else "同一目标"
+            return (
+                f"多人晚餐把随机约会后的信号拉回公开场，{source_text} 与 {target_text} 因 {focus_text} 形成了最明显竞争，"
+                "场内稳定度与焦虑分化已开始影响下一场主动选择。"
+            )
+        return "多人晚餐已形成注意力偏移和观察者再判断，但竞争关系尚未完全拉开。"
     strongest = sorted(
         relationship_deltas,
         key=lambda item: sum(abs(value) for value in item.changes.values()),
@@ -1547,11 +1784,24 @@ def build_next_tension(
     context: dict,
     transcript: list[AgentTurnPayload],
     relationship_deltas: list[SceneRelationshipDelta],
+    competition_map: list[SceneCompetitionMapItem] | None = None,
 ) -> str:
     if context["scene_id"] == SCENE_01_CODE:
         return "下一场自由交流里，谁会继续追问、谁会只停在礼貌互动，将开始分出真正聊得来的人。"
     if context["scene_id"] == SCENE_03_CODE:
         return "进入 scene_04_group_dinner 后，随机约会里意外升温的线会被多人竞争放大；到 scene_05_conversation_choosing 时，谁会主动继续聊将被重新检验。"
+    if context["scene_id"] == SCENE_04_CODE:
+        if competition_map:
+            top_item = max(competition_map, key=lambda item: item.competition_sense)
+            source_name = context["participant_lookup"].get(top_item.source_participant_id)
+            target_name = context["participant_lookup"].get(top_item.target_participant_id)
+            source_text = source_name.name if source_name else top_item.source_participant_id
+            target_text = target_name.name if target_name else top_item.target_participant_id
+            return (
+                f"scene_05_conversation_choosing 中，{source_text} 与 {target_text} 将在竞争余波里给出主动选择，"
+                "晚餐里的公开信号会直接影响谁先迈出下一步。"
+            )
+        return "scene_05_conversation_choosing 将检验晚餐里形成的注意力偏移，谁会主动靠近、谁会因为焦虑而回避。"
     if not relationship_deltas:
         return "下一场张力仍然来自多人场里的误判与靠近。"
     hottest = max(

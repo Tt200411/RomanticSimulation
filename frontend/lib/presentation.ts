@@ -23,6 +23,7 @@ const metricLabels: Record<string, string> = {
   understood: "被理解感",
   curiosity: "探索意愿",
   anxiety: "焦虑",
+  competition_sense: "竞争感",
   expectation: "期待",
   disappointment: "失望",
   conflict: "冲突",
@@ -34,6 +35,7 @@ const sceneLabels: Record<string, string> = {
   scene_01_intro: "Scene 01 · 破冰初见",
   scene_02_free_talk: "Scene 02 · 第一次自由交流",
   scene_03_random_date: "Scene 03 · 随机约会",
+  scene_04_group_dinner: "Scene 04 · 多人晚餐与暗流",
 };
 
 const castRoleLabels: Record<string, string> = {
@@ -46,6 +48,9 @@ const strategyCardLabels: Record<string, string> = {
   playful_opening: "俏皮开场",
   seek_common_ground: "主动找共同点",
   ask_deeper_questions: "追问更深层",
+  hold_center: "稳住场面",
+  focus_one_person: "聚焦一人",
+  avoid_competition: "回避竞争",
 };
 
 const strategyCardDescriptions: Record<string, string> = {
@@ -53,6 +58,9 @@ const strategyCardDescriptions: Record<string, string> = {
   playful_opening: "提高火花感和注意力，容易催出交叉互动。",
   seek_common_ground: "更快建立舒适感和被理解感。",
   ask_deeper_questions: "更早暴露价值观，也更容易筛出真正聊得来的人。",
+  hold_center: "提高公开场合稳定度，降低失态风险。",
+  focus_one_person: "公开释放偏好，可能放大竞争感。",
+  avoid_competition: "减少正面对位冲突，但可能降低存在感。",
 };
 
 const personalityFieldLabels: Record<string, string> = {

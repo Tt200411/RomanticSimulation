@@ -244,6 +244,14 @@ export type SceneReplay = {
     reason: string;
     event_tags: string[];
   }>;
+  competition_map: Array<{
+    source_participant_id: string;
+    target_participant_id: string;
+    focus_participant_id?: string | null;
+    competition_sense: number;
+    reason: string;
+    event_tags: string[];
+  }>;
   pair_date_results: Array<{
     pair_index: number;
     participant_ids: string[];

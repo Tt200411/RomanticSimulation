@@ -136,6 +136,47 @@ export default function SceneReplayPage() {
             </section>
           ) : null}
 
+          {data.competition_map.length ? (
+            <section className="content-card">
+              <div className="section-heading">
+                <div>
+                  <span className="eyebrow subtle">Competition Map</span>
+                  <h2>Scene 04 竞争图谱</h2>
+                </div>
+              </div>
+              <div className="timeline-list">
+                {data.competition_map.map((item) => (
+                  <article
+                    key={`${item.source_participant_id}-${item.target_participant_id}-${item.focus_participant_id ?? "none"}`}
+                    className="timeline-card static"
+                  >
+                    <strong>
+                      {participantNameMap[item.source_participant_id] ?? item.source_participant_id}
+                      {" vs "}
+                      {participantNameMap[item.target_participant_id] ?? item.target_participant_id}
+                    </strong>
+                    <p>{item.reason}</p>
+                    <div className="metric-chip-row">
+                      <span className="metric-chip">competition_sense: {item.competition_sense}</span>
+                      {item.focus_participant_id ? (
+                        <span className="metric-chip">
+                          focus: {participantNameMap[item.focus_participant_id] ?? item.focus_participant_id}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="tag-row">
+                      {item.event_tags.map((tag) => (
+                        <span key={tag} className="soft-tag muted">
+                          {tag}
+                        </span>
+                      ))}
+                    </div>
+                  </article>
+                ))}
+              </div>
+            </section>
+          ) : null}
+
           {data.scene_plan ? (
             <section className="content-card">
               <div className="section-heading">
